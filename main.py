@@ -525,6 +525,15 @@ async def cancel_application(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@router.message(StateFilter(None), F.text)
+async def no_state_text(message: Message):
+    # текст вне анкеты: бот перезапускался и потерял шаг заполнения, сообщаем об этом
+    await message.answer(
+        "Похоже, заполнение заявки сбросилось (бот перезапускался). Нажми «📝 Подать заявку», чтобы начать заново.",
+        reply_markup=MAIN_MENU,
+    )
+
+
 # ---------- модерация (только в админ-чате) ----------
 
 @router.callback_query(F.data.startswith("mod_"))
