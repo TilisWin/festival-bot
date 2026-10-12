@@ -26,6 +26,7 @@ from datetime import datetime
 from email.message import EmailMessage
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramMigrateToChat
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -194,6 +195,16 @@ def set_status_sync(user_id: int, status: str) -> None:
             csv.writer(f, delimiter=";").writerows(rows)
 
 
+BACKGROUND_TASKS: set = set()  # чтобы фоновые задачи не удалялись сборщиком мусора до завершения
+
+
+async def send_email_background(subject: str, body: str) -> None:
+    try:
+        await asyncio.to_thread(send_email_sync, subject, body)
+    except Exception:
+        logging.exception("Не удалось отправить заявку на почту")
+
+
 def send_email_sync(subject: str, body: str) -> None:
     """Дублирует заявку письмом на почту фестиваля. Если SMTP не настроен, просто пропускает."""
     if not SMTP_USER or not SMTP_PASSWORD:
@@ -205,7 +216,7 @@ def send_email_sync(subject: str, body: str) -> None:
     msg["Subject"] = subject
     msg.set_content(body)
     context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as server:
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=15) as server:
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.send_message(msg)
 
@@ -494,22 +505,19 @@ async def send_application(cb: CallbackQuery, state: FSMContext, bot: Bot):
     except Exception:
         logging.exception("Не удалось записать заявку в файл")
 
-    # дублируем заявку письмом на почту фестиваля
+    # если админ-чат недоступен (сменился ID, бот не в группе), участник всё равно получает ответ,
+    # а заявка уже сохранена в файле и ушла письмом
     try:
-        await asyncio.to_thread(
-            send_email_sync,
-            f"Заявка «Генерация»: {data['name']}",
-            f"Дата: {row[0]}\nTelegram: {username or '—'} (id {user.id})\n\n" + format_application(data),
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"Новая заявка от {username or user.full_name} (id {user.id})\n\n"
+            + format_application(data),
+            reply_markup=moderation_keyboard(user.id),
         )
+    except TelegramMigrateToChat as e:
+        logging.error("Админ-чат сменил ID: в ADMIN_CHAT_ID нужно поставить %s", e.migrate_to_chat_id)
     except Exception:
-        logging.exception("Не удалось отправить заявку на почту")
-
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        f"Новая заявка от {username or user.full_name} (id {user.id})\n\n"
-        + format_application(data),
-        reply_markup=moderation_keyboard(user.id),
-    )
+        logging.exception("Не удалось отправить заявку в админ-чат")
 
     await state.clear()
     await cb.message.edit_text(
@@ -517,21 +525,19 @@ async def send_application(cb: CallbackQuery, state: FSMContext, bot: Bot):
     )
     await cb.answer()
 
+    # письмо на почту фестиваля отправляем в фоне, чтобы медленный SMTP не задерживал ответ участнику
+    subject = f"Заявка «Генерация»: {data['name']}"
+    body = f"Дата: {row[0]}\nTelegram: {username or '—'} (id {user.id})\n\n" + format_application(data)
+    task = asyncio.create_task(send_email_background(subject, body))
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(BACKGROUND_TASKS.discard)
+
 
 @router.callback_query(F.data == "cancel")
 async def cancel_application(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text("Заявка отменена.")
     await cb.answer()
-
-
-@router.message(StateFilter(None), F.text)
-async def no_state_text(message: Message):
-    # текст вне анкеты: бот перезапускался и потерял шаг заполнения, сообщаем об этом
-    await message.answer(
-        "Похоже, заполнение заявки сбросилось (бот перезапускался). Нажми «📝 Подать заявку», чтобы начать заново.",
-        reply_markup=MAIN_MENU,
-    )
 
 
 # ---------- модерация (только в админ-чате) ----------
@@ -546,15 +552,21 @@ async def moderate(cb: CallbackQuery, bot: Bot):
     user_id = int(user_id_str)
 
     if action == "mod_ok":
-        await bot.send_message(
-            user_id,
+        text_to_user = (
             "Твоя заявка одобрена! Скоро с тобой свяжутся менеджеры: они пришлют реквизиты "
-            "для оплаты на указанную почту.",
+            "для оплаты на указанную почту."
         )
         status_text, file_status = "✅ Одобрено", "одобрено"
     else:
-        await bot.send_message(user_id, "К сожалению, заявка не прошла модерацию.")
+        text_to_user = "К сожалению, заявка не прошла модерацию."
         status_text, file_status = "❌ Отклонено", "отклонено"
+
+    try:
+        await bot.send_message(user_id, text_to_user)
+    except Exception:
+        # участник мог заблокировать бота; статус всё равно меняем, но предупреждаем модераторов
+        logging.exception("Не удалось отправить решение участнику %s", user_id)
+        status_text += " (участнику не доставлено)"
 
     try:
         await asyncio.to_thread(set_status_sync, user_id, file_status)
@@ -575,6 +587,17 @@ async def cmd_export(message: Message):
         await message.answer("Заявок пока нет.")
         return
     await message.answer_document(FSInputFile(APPLICATIONS_CSV), caption="Все заявки на текущий момент")
+
+
+# ---------- запасной ответ (ставим в конец, чтобы не перехватывать команды и админ-чат) ----------
+
+@router.message(StateFilter(None), F.text, F.chat.type == "private")
+async def no_state_text(message: Message):
+    # текст вне анкеты в личке: бот перезапускался и потерял шаг заполнения, сообщаем об этом
+    await message.answer(
+        "Похоже, заполнение заявки сбросилось (бот перезапускался). Нажми «📝 Подать заявку», чтобы начать заново.",
+        reply_markup=MAIN_MENU,
+    )
 
 
 # ---------- запуск ----------
