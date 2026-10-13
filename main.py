@@ -73,21 +73,23 @@ WELCOME_TEXT = (
 
 INFO_TEXT = (
     "«Генерация» проходит с 22 по 25 декабря 2026 года. Работы оценивают судьи в прямом эфире.\n\n"
-    "Главное:\n"
-    "• Регистрация открыта до 15.12.2026, 23:59 (МСК).\n"
-    "• Одну работу можно подать только в одну номинацию.\n"
-    "• Участвовать можно в неограниченном количестве номинаций и подавать неограниченное количество неповторяющихся работ.\n"
-    "• Стоимость: 2 500 ₽ за одну номинацию до 14.11.2026, с 15.11.2026 — 3 000 ₽.\n"
-    "• Оплата только после модерации, по реквизитам из письма на твою почту.\n\n"
+    "<b>Главное:</b>\n"
+    "➡️ Регистрация открыта до 15.12.2026, 23:59 (МСК).\n"
+    "➡️ Одну работу можно подать только в одну номинацию.\n"
+    "➡️ Участвовать можно в неограниченном количестве номинаций и подавать неограниченное количество неповторяющихся работ.\n"
+    "➡️ Оплата только после модерации, по реквизитам из письма на твою почту.\n\n"
+    "<b>Стоимость:</b>\n"
+    "➡️ 2 500 ₽ за одну номинацию до 14.11.2026\n"
+    "➡️ 3 000 ₽ с 15.11.2026\n\n"
     "Полный регламент — в файле ниже."
 )
 
 CONSENT_TEXT = (
-    "Для участия в фестивале нам нужно твоё согласие на обработку персональных данных. "
+    "<b>Для участия в фестивале нам нужно твоё согласие на обработку персональных данных.</b>\n"
     "Мы собираем имя и ник, ссылки на соцсети, страну и город, почту, описание о себе и фото или видео работ. "
     "Данные нужны только для отбора участников и связи с тобой. "
     "Мы не передаём их третьим лицам, кроме случаев, предусмотренных законом.\n\n"
-    "Нажимая «Согласен», ты подтверждаешь, что ознакомлен и согласен с обработкой данных."
+    "<blockquote>Нажимая «Согласен», ты подтверждаешь, что ознакомлен и согласен с обработкой данных.</blockquote>"
 )
 
 RULES_TEXT = (
@@ -181,14 +183,14 @@ def append_application_sync(row: list[str]) -> None:
 
 
 def set_status_sync(user_id: int, status: str) -> None:
-    """Меняет статус последней заявки участника, которая ещё на модерации."""
+    """Меняет статус последней заявки участника (решение модератора можно менять несколько раз)."""
     with CSV_LOCK:
         if not os.path.exists(APPLICATIONS_CSV):
             return
         with open(APPLICATIONS_CSV, newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f, delimiter=";"))
         for i in range(len(rows) - 1, 0, -1):
-            if rows[i][1] == str(user_id) and rows[i][-1] == STATUS_PENDING:
+            if rows[i][1] == str(user_id):
                 rows[i][-1] = status
                 break
         with open(APPLICATIONS_CSV, "w", newline="", encoding="utf-8-sig") as f:
@@ -278,6 +280,18 @@ class Form(StatesGroup):
     confirm = State()
 
 
+class Moderation(StatesGroup):
+    reject_reason = State()  # модератор пишет причину отказа, которая уйдёт участнику
+
+
+STATUS_MARK = "\n\nСтатус: "
+
+
+def card_base_text(text: str | None) -> str:
+    """Текст карточки без строки статуса, чтобы статус можно было менять сколько угодно раз."""
+    return (text or "").split(STATUS_MARK)[0]
+
+
 def format_application(data: dict) -> str:
     noms = ", ".join(NOMINATIONS[i] for i in data.get("noms", []))
     return (
@@ -327,7 +341,7 @@ async def show_price(message: Message):
 @router.message(F.text == "📝 Подать заявку")
 async def form_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(INFO_TEXT, reply_markup=ReplyKeyboardRemove())
+    await message.answer(INFO_TEXT, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
     await message.answer_document(FSInputFile(REGLAMENT_PATH), caption="Регламент фестиваля «Генерация»")
     await message.answer("Когда будешь готов, нажми «Продолжить».", reply_markup=info_keyboard())
 
@@ -342,7 +356,7 @@ def consent_keyboard() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "form_go")
 async def form_go(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Form.consent)
-    await cb.message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
+    await cb.message.answer(CONSENT_TEXT, reply_markup=consent_keyboard(), parse_mode="HTML")
     await cb.answer()
 
 
@@ -447,15 +461,15 @@ async def nominations_done(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Form.works)
     hints = works_hints(data["noms"])
     text = (
-        "Пришли одну ссылку на папку (Яндекс Диск, Google Диск, облако) со всеми работами.\n\n"
-        "Важно:\n"
+        "<b>Пришли одну ссылку на папку (Яндекс Диск, Google Диск, облако) со всеми работами.</b>\n\n"
+        "<blockquote><b>Важно:</b>\n"
         "• открой доступ к папке «по ссылке», иначе мы не сможем её посмотреть;\n"
         "• в названии каждого файла укажи номинацию, например: «Миди цвет_1.jpg», «Аниме цвет_2.jpg»;\n"
-        "• фото без обработки в сторонних программах, допускается только поляризационный фильтр."
+        "• фото без обработки в сторонних программах, допускается только поляризационный фильтр.</blockquote>"
     )
     if hints:
-        text += "\n\nДля выбранных номинаций можно дополнительно положить в папку:\n" + "\n".join(f"• {h}" for h in hints)
-    await cb.message.answer(text)
+        text += "\n\n<b>Для выбранных номинаций можно дополнительно положить в папку:</b>\n" + "\n".join(f"• {h}" for h in hints)
+    await cb.message.answer(text, parse_mode="HTML")
     await cb.answer()
 
 
@@ -542,39 +556,89 @@ async def cancel_application(cb: CallbackQuery, state: FSMContext):
 
 # ---------- модерация (только в админ-чате) ----------
 
-@router.callback_query(F.data.startswith("mod_"))
-async def moderate(cb: CallbackQuery, bot: Bot):
-    if cb.message.chat.id != ADMIN_CHAT_ID:
-        await cb.answer("Недоступно", show_alert=True)
-        return
-
-    action, user_id_str = cb.data.split(":")
-    user_id = int(user_id_str)
-
-    if action == "mod_ok":
-        text_to_user = (
-            "Твоя заявка одобрена! Скоро с тобой свяжутся менеджеры: они пришлют реквизиты "
-            "для оплаты на указанную почту."
-        )
-        status_text, file_status = "✅ Одобрено", "одобрено"
-    else:
-        text_to_user = "К сожалению, заявка не прошла модерацию."
-        status_text, file_status = "❌ Отклонено", "отклонено"
-
+async def save_status(user_id: int, status: str) -> None:
     try:
-        await bot.send_message(user_id, text_to_user)
-    except Exception:
-        # участник мог заблокировать бота; статус всё равно меняем, но предупреждаем модераторов
-        logging.exception("Не удалось отправить решение участнику %s", user_id)
-        status_text += " (участнику не доставлено)"
-
-    try:
-        await asyncio.to_thread(set_status_sync, user_id, file_status)
+        await asyncio.to_thread(set_status_sync, user_id, status)
     except Exception:
         logging.exception("Не удалось обновить статус в файле заявок")
 
-    await cb.message.edit_text(f"{cb.message.text}\n\n{status_text}")
+
+async def update_card(bot: Bot, chat_id: int, message_id: int, text: str, user_id: int) -> None:
+    try:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=moderation_keyboard(user_id))
+    except Exception:
+        logging.exception("Не удалось обновить карточку заявки")
+
+
+@router.callback_query(F.data.startswith("mod_ok:"))
+async def moderate_approve(cb: CallbackQuery, bot: Bot):
+    if cb.message.chat.id != ADMIN_CHAT_ID:
+        await cb.answer("Недоступно", show_alert=True)
+        return
+    user_id = int(cb.data.split(":")[1])
+    note = ""
+    try:
+        await bot.send_message(
+            user_id,
+            "Твоя заявка одобрена! Скоро с тобой свяжутся менеджеры: они пришлют реквизиты "
+            "для оплаты на указанную почту.",
+        )
+    except Exception:
+        # участник мог заблокировать бота; решение всё равно сохраняем и предупреждаем модераторов
+        logging.exception("Не удалось отправить решение участнику %s", user_id)
+        note = " (участнику не доставлено)"
+    await save_status(user_id, "одобрено")
+    await update_card(
+        bot, cb.message.chat.id, cb.message.message_id,
+        card_base_text(cb.message.text) + STATUS_MARK + "✅ Одобрено" + note, user_id,
+    )
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("mod_no:"))
+async def moderate_reject_start(cb: CallbackQuery, state: FSMContext):
+    if cb.message.chat.id != ADMIN_CHAT_ID:
+        await cb.answer("Недоступно", show_alert=True)
+        return
+    user_id = int(cb.data.split(":")[1])
+    # отказ не применяем сразу: сначала ждём причину от модератора
+    await state.set_state(Moderation.reject_reason)
+    await state.update_data(
+        target_user_id=user_id,
+        card_message_id=cb.message.message_id,
+        card_text=card_base_text(cb.message.text),
+    )
+    await cb.message.reply(
+        "Напиши причину отказа одним сообщением: я отправлю её участнику.\n"
+        "Чтобы передумать, отправь /cancel."
+    )
+    await cb.answer()
+
+
+@router.message(Moderation.reject_reason, F.text, F.chat.id == ADMIN_CHAT_ID)
+async def moderate_reject_reason(message: Message, state: FSMContext, bot: Bot):
+    reason = message.text.strip()
+    if not reason:
+        await message.reply("Причина не может быть пустой. Напиши её текстом.")
+        return
+    data = await state.get_data()
+    user_id = data["target_user_id"]
+    note = ""
+    try:
+        await bot.send_message(
+            user_id,
+            f"К сожалению, заявка не прошла модерацию.\n\nКомментарий модератора: {reason}",
+        )
+    except Exception:
+        logging.exception("Не удалось отправить отказ участнику %s", user_id)
+        note = " (участнику не доставлено)"
+    await save_status(user_id, "отклонено")
+    await update_card(
+        bot, ADMIN_CHAT_ID, data["card_message_id"],
+        data["card_text"] + STATUS_MARK + "❌ Отклонено" + note, user_id,
+    )
+    await state.clear()
+    await message.reply("Отказ с комментарием отправлен участнику.")
 
 
 # ---------- выгрузка списка заявок (только в админ-чате) ----------
